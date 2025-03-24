@@ -68,10 +68,6 @@ def get_pdf_download_link(file_path):
         st.error(f"PDF indirme hatası: {e}")
         return None
 
-# Favori PDFler için oturum durumu 
-if "favorite_pdfs" not in st.session_state:
-    st.session_state.favorite_pdfs = set()
-
 # Sınıf örneklerini oluştur
 arxiv_downloader = ArxivDownloader(save_dir=DOWNLOAD_DIR)
 chroma_manager = ChromaManager(db_path=DB_PATH)
@@ -84,7 +80,7 @@ with st.sidebar:
     # Sayfa Seçimi
     page = st.radio(
         "Sayfa",
-        ["Ana Sayfa", "ArXiv İndirici", "İndirilen PDF'ler", "Favoriler", "Ayrıca PDF Ekle", "Veritabanı Yönetimi"]
+        ["Ana Sayfa", "ArXiv İndirici", "İndirilen PDF'ler", "Ayrıca PDF Ekle", "Veritabanı Yönetimi"]
     )
     
     # Veritabanı durumu
@@ -112,23 +108,7 @@ with st.sidebar:
         
         **Veritabanı Yönetimi**: Chroma veritabanındaki belgeleri yönetin ve arama yapın.
         
-        **Favoriler**: Beğendiğiniz PDF'leri görüntüleyin.
-        
         Bu uygulama, Claude AI ile kullanmak üzere araştırma makalelerinden bir veritabanı oluşturmanıza yardımcı olur.
-        """)
-    
-    # MCP sunucusu bilgisi
-    with st.expander("MCP Sunucusu"):
-        st.write("""
-        Claude ile kullanmak için, Chroma MCP sunucusunu başlatmalısınız:
-        
-        ```
-        uvx chroma-mcp --client-type persistent --data-dir "{DB_PATH}"
-        ```
-        
-        Claude Desktop'ta Local Data Sources ayarına şunları ekleyin:
-        - URL: http://localhost:8000
-        - Collection: knowledge
         """)
 
 
@@ -149,7 +129,6 @@ if page == "Ana Sayfa":
         - İndirilen PDF'leri görüntüleyin ve yönetin
         - PDF dosyalarınızı yükleyin ve inceleyin
         - Seçtiğiniz makaleleri Chroma veritabanına ekleyin
-        - Beğendiğiniz PDF'leri favorilere ekleyin
         - Veritabanında arama yapın ve belgeleri yönetin
         """)
         
@@ -271,7 +250,7 @@ elif page == "ArXiv İndirici":
                     st.write("**Özet:**")
                     st.write(paper['summary'])
                     
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2 = st.columns(2)
                     
                     with col1:
                         # İndirme durumunu kontrol et
@@ -279,11 +258,11 @@ elif page == "ArXiv İndirici":
                             st.success("İndirildi ✓")
                             
                             # PDF görüntüleme butonu
-                            if st.button(f"PDF'i İndir #{i}"):
+                            if st.button("PDF'i İndir", key=f"download_{paper['arxiv_id']}"):
                                 st.markdown(get_pdf_download_link(paper["local_path"]), unsafe_allow_html=True)
                             
                             # ChomraDB'ye ekleme düğmesi
-                            if st.button(f"Veritabanına Ekle #{i}"):
+                            if st.button("Veritabanına Ekle", key=f"add_to_db_{paper['arxiv_id']}"):
                                 with st.spinner("Veritabanına ekleniyor..."):
                                     # Metadata hazırla (basitleştirilmiş)
                                     metadata = {
@@ -301,18 +280,8 @@ elif page == "ArXiv İndirici":
                                         st.success("Veritabanına eklendi!")
                                     else:
                                         st.error(f"Ekleme hatası: {result['error']}")
-                            
-                            # Favori olarak işaretle
-                            if paper["local_path"] in st.session_state.favorite_pdfs:
-                                if st.button(f"⭐ Favorilerden Çıkar #{i}"):
-                                    st.session_state.favorite_pdfs.remove(paper["local_path"])
-                                    st.success("Favorilerden çıkarıldı.")
-                            else:
-                                if st.button(f"☆ Favorilere Ekle #{i}"):
-                                    st.session_state.favorite_pdfs.add(paper["local_path"])
-                                    st.success("Favorilere eklendi!")
                         else:
-                            if st.button(f"İndir #{i}"):
+                            if st.button("İndir", key=f"download_{paper['arxiv_id']}"):
                                 with st.spinner("İndiriliyor..."):
                                     file_path = arxiv_downloader.download_paper(paper)
                                     if file_path:
@@ -363,58 +332,123 @@ elif page == "İndirilen PDF'ler":
     if not st.session_state.downloaded_pdfs:
         st.info("Henüz indirilmiş PDF bulunmuyor.")
     else:
-        for i, pdf in enumerate(st.session_state.downloaded_pdfs):
-            with st.expander(f"{i+1}. {pdf['title']}", expanded=False):
-                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+        # Toplu seçim ve işlem butonları
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("Tümünü Seç", key="select_all_downloaded"):
+                for i in range(len(st.session_state.downloaded_pdfs)):
+                    st.session_state[f"select_pdf_{i}"] = True
+        
+        with col2:
+            if st.button("Seçili PDF'leri DB'ye Ekle", key="add_selected_to_db"):
+                selected_pdfs = [
+                    pdf for i, pdf in enumerate(st.session_state.downloaded_pdfs)
+                    if st.session_state.get(f"select_pdf_{i}", False)
+                ]
                 
-                with col1:
-                    st.write(f"**Dosya:** {pdf['file_name']}")
-                    st.write(f"**Yazarlar:** {pdf['authors']}")
-                    st.write(f"**Tarih:** {pdf['created']}")
+                if not selected_pdfs:
+                    st.warning("Veritabanına eklenecek PDF seçilmedi.")
+                else:
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    added = []
+                    for i, pdf in enumerate(selected_pdfs):
+                        status_text.text(f"Ekleniyor: {pdf['title']}")
+                        # Basitleştirilmiş metadata
+                        metadata = {
+                            "title": pdf["title"],
+                            "author": pdf["authors"],
+                            "source": "download_folder"
+                        }
+                        
+                        result = chroma_manager.add_pdf(pdf["file_path"], metadata)
+                        
+                        if result["success"]:
+                            added.append(pdf)
+                        
+                        progress_bar.progress((i + 1) / len(selected_pdfs))
+                        time.sleep(0.5)  # API limitleri için bekleme
+                    
+                    status_text.text(f"{len(added)} PDF veritabanına eklendi.")
+                    st.success(f"{len(added)} PDF başarıyla veritabanına eklendi.")
+        
+        with col3:
+            if st.button("Seçili PDF'leri Sil", key="delete_selected_pdfs"):
+                selected_pdfs = [
+                    pdf for i, pdf in enumerate(st.session_state.downloaded_pdfs)
+                    if st.session_state.get(f"select_pdf_{i}", False)
+                ]
                 
-                with col2:
-                    # PDF indirme butonu
-                    if st.button(f"📥 İndir #{i}"):
-                        st.markdown(get_pdf_download_link(pdf["file_path"]), unsafe_allow_html=True)
-                
-                with col3:
-                    # Veritabanına ekleme butonu
-                    if st.button(f"💾 DB'ye Ekle #{i}"):
-                        with st.spinner("Veritabanına ekleniyor..."):
-                            # Basitleştirilmiş metadata
-                            metadata = {
-                                "title": pdf["title"],
-                                "author": pdf["authors"],
-                                "source": "download_folder"
-                            }
+                if not selected_pdfs:
+                    st.warning("Silinecek PDF seçilmedi.")
+                else:
+                    if st.warning(f"{len(selected_pdfs)} PDF siliniyor."):
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        deleted = []
+                        for i, pdf in enumerate(selected_pdfs):
+                            status_text.text(f"Siliniyor: {pdf['title']}")
+                            if delete_pdf(pdf["file_path"]):
+                                deleted.append(pdf)
                             
-                            result = chroma_manager.add_pdf(pdf["file_path"], metadata)
-                            
-                            if result["success"]:
-                                st.success("Veritabanına eklendi!")
-                            else:
-                                st.error(f"Ekleme hatası: {result['error']}")
-                
-                with col4:
-                    # Favori işaretleme
-                    if pdf["file_path"] in st.session_state.favorite_pdfs:
-                        if st.button(f"⭐ Favoriden Çıkar #{i}"):
-                            st.session_state.favorite_pdfs.remove(pdf["file_path"])
-                            st.success("Favorilerden çıkarıldı.")
-                            st.experimental_rerun()
-                    else:
-                        if st.button(f"☆ Favoriye Ekle #{i}"):
-                            st.session_state.favorite_pdfs.add(pdf["file_path"])
-                            st.success("Favorilere eklendi!")
-                            st.experimental_rerun()
-                
-                # Silme butonu
-                if st.button(f"🗑️ Sil #{i}", key=f"delete_{pdf['file_path']}"):
-                    if delete_pdf(pdf["file_path"]):
-                        st.success("PDF başarıyla silindi!")
+                            progress_bar.progress((i + 1) / len(selected_pdfs))
+                            time.sleep(0.5)
+                        
+                        status_text.text(f"{len(deleted)} PDF silindi.")
+                        st.success(f"{len(deleted)} PDF başarıyla silindi.")
                         st.experimental_rerun()
-                    else:
-                        st.error("PDF silinemedi. Lütfen tekrar deneyin.")
+        
+        # PDF listesi
+        for i, pdf in enumerate(st.session_state.downloaded_pdfs):
+            col1, col2 = st.columns([1, 20])
+            
+            with col1:
+                if f"select_pdf_{i}" not in st.session_state:
+                    st.session_state[f"select_pdf_{i}"] = False
+                
+                selected = st.checkbox("", key=f"select_pdf_{i}")
+            
+            with col2:
+                with st.expander(f"{i+1}. {pdf['title']}", expanded=False):
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    
+                    with col1:
+                        st.write(f"**Dosya:** {pdf['file_name']}")
+                        st.write(f"**Yazarlar:** {pdf['authors']}")
+                        st.write(f"**Tarih:** {pdf['created']}")
+                    
+                    with col2:
+                        # PDF indirme butonu
+                        if st.button("📥 İndir", key=f"download_{pdf['file_path']}"):
+                            st.markdown(get_pdf_download_link(pdf["file_path"]), unsafe_allow_html=True)
+                    
+                    with col3:
+                        # Veritabanına ekleme butonu
+                        if st.button("💾 DB'ye Ekle", key=f"add_to_db_{pdf['file_path']}"):
+                            with st.spinner("Veritabanına ekleniyor..."):
+                                # Basitleştirilmiş metadata
+                                metadata = {
+                                    "title": pdf["title"],
+                                    "author": pdf["authors"],
+                                    "source": "download_folder"
+                                }
+                                
+                                result = chroma_manager.add_pdf(pdf["file_path"], metadata)
+                                
+                                if result["success"]:
+                                    st.success("Veritabanına eklendi!")
+                                else:
+                                    st.error(f"Ekleme hatası: {result['error']}")
+                    
+                    # Silme butonu
+                    if st.button("🗑️ Sil", key=f"delete_{pdf['file_path']}"):
+                        if delete_pdf(pdf["file_path"]):
+                            st.success("PDF başarıyla silindi!")
+                            st.experimental_rerun()
+                        else:
+                            st.error("PDF silinemedi. Lütfen tekrar deneyin.")
 
 
 # PDF Yönetimi
@@ -475,75 +509,6 @@ elif page == "Ayrıca PDF Ekle":
                     # PDF görüntüleme butonu
                     if st.button(f"PDF'i İndir #{i}"):
                         st.markdown(get_pdf_download_link(file_path), unsafe_allow_html=True)
-
-
-# Favoriler
-elif page == "Favoriler":
-    st.title("Favori PDF'ler")
-    
-    if not st.session_state.favorite_pdfs:
-        st.info("Henüz favori PDF'iniz bulunmuyor. PDF'leri görüntülerken ⭐ simgesine tıklayarak favorilere ekleyebilirsiniz.")
-    else:
-        st.write(f"**{len(st.session_state.favorite_pdfs)} favori PDF bulundu**")
-        
-        # Favori PDF'leri al
-        favorite_pdfs = []
-        for file_path in st.session_state.favorite_pdfs:
-            if os.path.exists(file_path):
-                processor = PDFProcessor(file_path)
-                metadata = processor.extract_metadata()
-                file_info = processor.get_file_info()
-                pdf_info = {**metadata, **file_info}
-                favorite_pdfs.append(pdf_info)
-        
-        # PDF grid görünümü
-        cols = st.columns(3)
-        
-        for i, pdf in enumerate(favorite_pdfs):
-            col = cols[i % 3]
-            
-            with col:
-                with st.container():
-                    st.markdown(f"""
-                    <div class="pdf-container">
-                        <h4>{pdf['title']}</h4>
-                        <p><strong>Dosya:</strong> {pdf['file_name']}</p>
-                        <p><strong>Yazarlar:</strong> {pdf.get('authors', 'Belirtilmemiş')}</p>
-                        <p><strong>Tarih:</strong> {pdf.get('created', 'Belirtilmemiş')}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Butonlar
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        if st.button(f"İndir #{i}"):
-                            st.markdown(get_pdf_download_link(pdf["file_path"]), unsafe_allow_html=True)
-                    
-                    with col2:
-                        # Veritabanına ekleme butonu
-                        if st.button(f"DB'ye Ekle #{i}"):
-                            with st.spinner("Veritabanına ekleniyor..."):
-                                # Basitleştirilmiş metadata
-                                metadata = {
-                                    "title": pdf["title"],
-                                    "author": pdf.get("authors", ""),
-                                    "source": "favorite"
-                                }
-                                
-                                result = chroma_manager.add_pdf(pdf["file_path"], metadata)
-                                
-                                if result["success"]:
-                                    st.success("Veritabanına eklendi!")
-                                else:
-                                    st.error(f"Ekleme hatası: {result['error']}")
-                    
-                    with col3:
-                        # Favoriden çıkarma
-                        if st.button(f"⭐ Favoriden Çıkar #{i}"):
-                            st.session_state.favorite_pdfs.remove(pdf["file_path"])
-                            st.success("Favorilerden çıkarıldı.")
-                            st.experimental_rerun()
 
 
 # Veritabanı Yönetimi
