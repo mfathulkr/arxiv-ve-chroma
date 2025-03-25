@@ -164,38 +164,77 @@ elif page == "ArXiv İndirici":
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            query = st.text_input("Anahtar Kelime", "machine learning")
+            query = st.text_input("Anahtar Kelime", "reinforcement learning")
+            st.info("Örnek: 'deep learning', 'transformer', 'attention mechanism'")
         
         with col2:
             current_year = datetime.now().year
             years = list(range(2005, current_year + 1))
             years.reverse()
-            start_year = st.selectbox("Başlangıç Yılı", years, index=5)
+            start_year = st.selectbox("Başlangıç Yılı", years, index=1)
         
         with col3:
-            max_results = st.slider("Maksimum Sonuç", min_value=5, max_value=100, value=20, step=5)
+            sort_by = st.selectbox(
+                "Sıralama",
+                ["En Yeni", "En Eski", "Alaka Düzeyi"],
+                index=0
+            )
+        
+        # Sayfalama seçenekleri
+        per_page = st.selectbox(
+            "Sayfa Başına Göster",
+            [20, 50, 100, 200],
+            index=0
+        )
         
         submitted = st.form_submit_button("ArXiv'de Ara")
     
     if submitted:
         with st.spinner("ArXiv'de makaleler aranıyor..."):
             try:
-                papers = arxiv_downloader.search_papers(
+                # Sıralama parametresini ayarla
+                sort_param = {
+                    "En Yeni": "submittedDate",
+                    "En Eski": "submittedDate",
+                    "Alaka Düzeyi": "relevance"
+                }[sort_by]
+                
+                # Sıralama yönünü ayarla
+                sort_order = "descending" if sort_by == "En Yeni" else "ascending"
+                
+                # Sayfalama için offset hesapla
+                if "current_page" not in st.session_state:
+                    st.session_state.current_page = 0
+                
+                offset = st.session_state.current_page * per_page
+                
+                total_count, papers = arxiv_downloader.search_papers(
                     query_keyword=query,
                     start_year=start_year,
-                    max_results=max_results
+                    sort_by=sort_param,
+                    sort_order=sort_order,
+                    offset=offset,
+                    per_page=per_page
                 )
-                st.session_state.arxiv_papers = papers
-                st.success(f"Toplam {len(papers)} makale bulundu.")
+                
+                if not papers:
+                    st.warning("Arama kriterlerinize uygun makale bulunamadı. Lütfen farklı anahtar kelimeler deneyin.")
+                else:
+                    st.session_state.arxiv_papers = papers
+                    st.session_state.total_papers = total_count
+                    st.success(f"Sayfa {st.session_state.current_page + 1} için {len(papers)} makale bulundu.")
+                    
             except Exception as e:
-                st.error(f"Arama sırasında hata oluştu: {e}")
+                st.error(f"Arama sırasında hata oluştu: {str(e)}")
+                st.info("Lütfen daha sonra tekrar deneyin veya farklı arama kriterleri kullanın.")
     
     # Bulunan makaleleri görüntüle
     if "arxiv_papers" in st.session_state and st.session_state.arxiv_papers:
         st.subheader("Bulunan Makaleler")
         
-        # Toplu seçim ve indirme
-        col1, col2 = st.columns([1, 3])
+        # Toplu işlem butonları
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        
         with col1:
             if st.button("Tümünü Seç", key="select_all_arxiv"):
                 for i in range(len(st.session_state.arxiv_papers)):
@@ -229,17 +268,108 @@ elif page == "ArXiv İndirici":
                     
                     status_text.text(f"{len(downloaded)} makale indirildi.")
                     st.success(f"{len(downloaded)} makale başarıyla indirildi.")
-                    
+        
+        with col3:
+            if st.button("Tüm Makaleleri İndir", key="download_all", type="primary"):
+                if st.warning(f"Toplam {st.session_state.total_papers} makale indirilecek. Bu işlem biraz zaman alabilir. Devam etmek istiyor musunuz?"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Evet", key="confirm_download_all"):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            downloaded = []
+                            for i, paper in enumerate(st.session_state.arxiv_papers):
+                                status_text.text(f"İndiriliyor: {paper['title']}")
+                                file_path = arxiv_downloader.download_paper(paper)
+                                
+                                if file_path:
+                                    paper["downloaded"] = True
+                                    paper["local_path"] = file_path
+                                    downloaded.append(paper)
+                                
+                                progress_bar.progress((i + 1) / len(st.session_state.arxiv_papers))
+                                time.sleep(1)  # API limitleri için bekleme
+                            
+                            status_text.text(f"{len(downloaded)} makale indirildi.")
+                            st.success(f"{len(downloaded)} makale başarıyla indirildi.")
+                    with col2:
+                        if st.button("Kapat", key="cancel_download_all"):
+                            st.info("İşlem iptal edildi.")
+        
+        with col4:
+            if st.button("Tüm Makaleleri DB'ye Ekle", key="add_all_to_db", type="primary"):
+                if st.warning(f"Toplam {st.session_state.total_papers} makale veritabanına eklenecek. Bu işlem biraz zaman alabilir. Devam etmek istiyor musunuz?"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Evet", key="confirm_add_all_to_db"):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            added = []
+                            for i, paper in enumerate(st.session_state.arxiv_papers):
+                                status_text.text(f"Ekleniyor: {paper['title']}")
+                                
+                                # Önce indir
+                                file_path = arxiv_downloader.download_paper(paper)
+                                if file_path:
+                                    # Metadata hazırla
+                                    metadata = {
+                                        "title": paper["title"],
+                                        "author": ", ".join(paper["authors"]),
+                                        "summary": paper["summary"][:500],
+                                        "published": paper["published"].strftime("%Y-%m-%d"),
+                                        "arxiv_id": paper["arxiv_id"],
+                                        "source": "arxiv"
+                                    }
+                                    
+                                    # Veritabanına ekle
+                                    result = chroma_manager.add_pdf(file_path, metadata)
+                                    if result["success"]:
+                                        added.append(paper)
+                                
+                                progress_bar.progress((i + 1) / len(st.session_state.arxiv_papers))
+                                time.sleep(1)  # API limitleri için bekleme
+                            
+                            status_text.text(f"{len(added)} makale veritabanına eklendi.")
+                            st.success(f"{len(added)} makale başarıyla veritabanına eklendi.")
+                    with col2:
+                        if st.button("Kapat", key="cancel_add_all_to_db"):
+                            st.info("İşlem iptal edildi.")
+        
+        # Sayfalama
+        total_papers = st.session_state.total_papers
+        total_pages = (total_papers + per_page - 1) // per_page
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col1:
+            if st.button("Önceki Sayfa") and st.session_state.current_page > 0:
+                st.session_state.current_page -= 1
+                st.experimental_rerun()
+        with col2:
+            # ArXiv web arayüzüne benzer şekilde göster
+            start_idx = st.session_state.current_page * per_page + 1
+            end_idx = min(start_idx + per_page - 1, total_papers)
+            st.write(f"Showing {start_idx}–{end_idx} of {total_papers} results")
+        with col3:
+            if st.button("Sonraki Sayfa") and st.session_state.current_page < total_pages - 1:
+                st.session_state.current_page += 1
+                st.experimental_rerun()
+        
+        # Mevcut sayfadaki makaleleri göster
+        start_idx = st.session_state.current_page * per_page
+        end_idx = min(start_idx + per_page, total_papers)
+        current_papers = st.session_state.arxiv_papers[start_idx:end_idx]
         
         # Makale listesi
-        for i, paper in enumerate(st.session_state.arxiv_papers):
+        for i, paper in enumerate(current_papers):
             col1, col2 = st.columns([1, 20])
             
             with col1:
-                if f"select_paper_{i}" not in st.session_state:
-                    st.session_state[f"select_paper_{i}"] = False
+                if f"select_paper_{start_idx + i}" not in st.session_state:
+                    st.session_state[f"select_paper_{start_idx + i}"] = False
                 
-                selected = st.checkbox("", key=f"select_paper_{i}")
+                selected = st.checkbox("", key=f"select_paper_{start_idx + i}")
             
             with col2:
                 with st.expander(f"{paper['title']} ({paper['published'].strftime('%Y-%m-%d')})"):
@@ -268,7 +398,7 @@ elif page == "ArXiv İndirici":
                                     metadata = {
                                         "title": paper["title"],
                                         "author": ", ".join(paper["authors"]),
-                                        "summary": paper["summary"][:500],  # Özet çok uzun olabilir
+                                        "summary": paper["summary"][:500],
                                         "published": paper["published"].strftime("%Y-%m-%d"),
                                         "arxiv_id": paper["arxiv_id"],
                                         "source": "arxiv"
@@ -285,8 +415,8 @@ elif page == "ArXiv İndirici":
                                 with st.spinner("İndiriliyor..."):
                                     file_path = arxiv_downloader.download_paper(paper)
                                     if file_path:
-                                        st.session_state.arxiv_papers[i]["downloaded"] = True
-                                        st.session_state.arxiv_papers[i]["local_path"] = file_path
+                                        st.session_state.arxiv_papers[start_idx + i]["downloaded"] = True
+                                        st.session_state.arxiv_papers[start_idx + i]["local_path"] = file_path
                                         st.success("İndirildi!")
                                         st.experimental_rerun()
                                     else:
